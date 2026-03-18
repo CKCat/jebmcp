@@ -11,6 +11,7 @@ from com.pnfsoftware.jeb.client.api import IScript
 from com.pnfsoftware.jeb.core import Artifact, RuntimeProjectUtil
 from com.pnfsoftware.jeb.core.actions import (
     ActionContext,
+    ActionCommentData,
     ActionOverridesData,
     Actions,
     ActionXrefsData,
@@ -1038,6 +1039,488 @@ def check_java_identifier(filepath, identifier):
     return result
 
 
+@jsonrpc
+def rename_pseudo_code_variables(
+    filepath, method_signature, old_var_name, new_var_name
+):
+    """
+    Rename one or more local variables or parameters defined in the decompiled pseudo-code of a method.
+    The method must have been decompiled first.
+    """
+    if not filepath or not method_signature or not old_var_name or not new_var_name:
+        raise JSONRPCError(-1, ErrorMessages.MISSING_PARAM)
+
+    apk = getOrLoadApk(filepath)
+    if apk is None:
+        return False
+
+    codeUnit = apk.getDex()
+    method = codeUnit.getMethod(method_signature)
+    if not method:
+        raise_method_not_found(method_signature)
+
+    decomp = DecompilerHelper.getDecompiler(codeUnit)
+    if not decomp:
+        raise JSONRPCError(-1, ErrorMessages.DECOMPILE_FAILED)
+
+    # Ensure method is decompiled
+    method_sig = method.getSignature()
+    if not decomp.decompileMethod(method_sig):
+        raise JSONRPCError(-1, ErrorMessages.DECOMPILE_FAILED)
+
+    java_method = None
+    try:
+        java_method = decomp.getMethod(method_sig, False)
+    except Exception as e:
+        print("[MCP] decomp.getMethod failed: {0}".format(e))
+
+    found = False
+    debug_info = []
+
+    # New Strategy: Use decomp.setIdentifierName(IJavaIdentifier, String)
+    try:
+        idmgr = java_method.getIdentifierManager()
+        if idmgr:
+            all_idents = idmgr.getIdentifiers()
+            if all_idents:
+                for ident in all_idents:
+                    # Find out the current name of this identifier
+                    defn = idmgr.getDefinition(ident)
+                    iname = (
+                        defn.getName()
+                        if defn and hasattr(defn, "getName")
+                        else str(ident)
+                    )
+
+                    if iname == old_var_name:
+                        # Call the IDexDecompilerUnit.setIdentifierName method!
+                        if hasattr(decomp, "setIdentifierName"):
+                            try:
+                                res = decomp.setIdentifierName(ident, new_var_name)
+                                debug_info.append("setIdentifierName_res=" + str(res))
+                                found = True
+                            except:
+                                try:
+                                    res = decomp.setIdentifierName(
+                                        method_sig, old_var_name, new_var_name
+                                    )
+                                    debug_info.append(
+                                        "setIdentifierName_msig_res=" + str(res)
+                                    )
+                                    found = True
+                                except:
+                                    import sys
+
+                                    debug_info.append(
+                                        "setIdentifierName_err="
+                                        + str(sys.exc_info()[1])
+                                    )
+
+                        if not found:
+                            # Fallback if setIdentifierName fails or is not exposed
+                            if defn and hasattr(defn, "setName"):
+                                defn.setName(new_var_name)
+                                found = True
+                            elif hasattr(ident, "setName"):
+                                ident.setName(new_var_name)
+                                found = True
+                        break
+        else:
+            debug_info.append("idmgr=None")
+    except Exception as e:
+        import sys
+
+        debug_info.append("idmgr_err=" + str(sys.exc_info()[1]))
+
+    if not found:
+        raise JSONRPCError(
+            -1,
+            "[Error] Variable/Parameter '"
+            + old_var_name
+            + "' not found or rename failed. Debug: "
+            + "; ".join(debug_info),
+        )
+
+    return True
+
+
+def _rename_in_ast_elements(elements, old_var_name, new_var_name):
+    """Iterate through AST elements and attempt to rename matching identifiers."""
+    from com.pnfsoftware.jeb.core.units.code.java import IJavaIdentifier
+
+    if not elements:
+        return False
+
+    try:
+        count = elements.size() if hasattr(elements, "size") else len(elements)
+    except:
+        return False
+
+    found = False
+    for i in range(count):
+        try:
+            e = elements.get(i) if hasattr(elements, "get") else elements[i]
+            if e is None:
+                continue
+
+            if isinstance(e, IJavaIdentifier) and e.getName() == old_var_name:
+                try:
+                    e.setName(new_var_name)
+                    found = True
+                except:
+                    pass
+
+            # Recursively search in sub-elements if available
+            if hasattr(e, "getSubElements"):
+                subs = e.getSubElements()
+                if subs:
+                    if _rename_in_ast_elements(subs, old_var_name, new_var_name):
+                        found = True
+        except:
+            pass
+
+    return found
+
+
+def _find_var_address_in_ast(java_method, var_name):
+    """
+    Walk the AST of a decompiled method to find the address of a variable by name.
+    Returns the address (long) if found, None otherwise.
+    """
+    from com.pnfsoftware.jeb.core.units.code.java import IJavaIdentifier
+
+    # Check parameters first
+    try:
+        params = java_method.getParameters()
+        if params:
+            param_count = params.size() if hasattr(params, "size") else len(params)
+            for i in range(param_count):
+                p = params.get(i) if hasattr(params, "get") else params[i]
+                if p and hasattr(p, "getName") and p.getName() == var_name:
+                    if hasattr(p, "getAddress"):
+                        return p.getAddress()
+    except Exception:
+        pass
+
+    # Walk body elements recursively
+    try:
+        body = java_method.getBody()
+        if body:
+            return _walk_ast_for_var(body, var_name)
+    except Exception:
+        pass
+
+    return None
+
+
+def _walk_ast_for_var(element, var_name):
+    """Recursively walk AST elements to find a variable identifier by name."""
+    from com.pnfsoftware.jeb.core.units.code.java import IJavaIdentifier
+
+    if element is None:
+        return None
+
+    # Check if this element is an identifier with the target name
+    if isinstance(element, IJavaIdentifier):
+        if hasattr(element, "getName") and element.getName() == var_name:
+            if hasattr(element, "getAddress"):
+                return element.getAddress()
+
+    # Recurse into sub-elements
+    try:
+        subs = element.getSubElements() if hasattr(element, "getSubElements") else None
+        if subs:
+            sub_count = subs.size() if hasattr(subs, "size") else len(subs)
+            for i in range(sub_count):
+                sub = subs.get(i) if hasattr(subs, "get") else subs[i]
+                result = _walk_ast_for_var(sub, var_name)
+                if result is not None:
+                    return result
+    except Exception:
+        pass
+
+    return None
+
+
+def _rename_in_ast_elements(elements, old_name, new_name):
+    """Recursively search AST elements for an identifier with the given name and rename it."""
+    if not elements:
+        return False
+    try:
+        count = elements.size() if hasattr(elements, "size") else len(elements)
+        for i in range(count):
+            elem = elements.get(i) if hasattr(elements, "get") else elements[i]
+            if not elem:
+                continue
+            # Check if this element itself is a definition/identifier with getName/setName
+            if hasattr(elem, "getName") and hasattr(elem, "setName"):
+                if elem.getName() == old_name:
+                    elem.setName(new_name)
+                    print(
+                        "[MCP] Renamed AST element: {0} -> {1}".format(
+                            old_name, new_name
+                        )
+                    )
+                    return True
+            # Recurse into sub-elements if possible
+            if hasattr(elem, "getSubElements"):
+                sub = elem.getSubElements()
+                if sub and _rename_in_ast_elements(sub, old_name, new_name):
+                    return True
+    except Exception as e:
+        print("[MCP] Error in _rename_in_ast_elements: {0}".format(e))
+    return False
+
+
+@jsonrpc
+def list_cross_references(filepath, address):
+    """Retrieve cross-references to an address in a code unit, that is, the users or callers of the item at the provided address."""
+    if not filepath or not address:
+        raise JSONRPCError(-1, ErrorMessages.MISSING_PARAM)
+
+    apk = getOrLoadApk(filepath)
+    # Default use the dex unit
+    codeUnit = apk.getDex()
+    if not codeUnit:
+        raise JSONRPCError(-1, "[Error] DEX unit not found.")
+
+    # Try multiple ways to get the item object and its itemId
+    item = None
+    if address.startswith("L") and address.endswith(";"):
+        item = codeUnit.getClass(address)
+    elif address.startswith("L") and ";->" in address:
+        if "(" in address:
+            item = codeUnit.getMethod(address)
+        else:
+            item = codeUnit.getField(address)
+
+    # Generic fallback: search classes, methods, fields
+    if not item:
+        item = codeUnit.getClass(address)
+    if not item:
+        item = codeUnit.getMethod(address)
+    if not item:
+        item = codeUnit.getField(address)
+
+    if not item:
+        raise JSONRPCError(-1, ErrorMessages.ADDRESS_NOT_FOUND + " " + address)
+
+    item_id = item.getItemId()
+    if item_id <= 0:
+        raise JSONRPCError(-1, ErrorMessages.ADDRESS_NOT_FOUND + " " + address)
+
+    ret = []
+    actionXrefsData = ActionXrefsData()
+    actionContext = ActionContext(codeUnit, Actions.QUERY_XREFS, item_id, None)
+    if codeUnit.prepareExecution(actionContext, actionXrefsData):
+        for i in range(actionXrefsData.getAddresses().size()):
+            ret.append(
+                {
+                    "address": actionXrefsData.getAddresses()[i],
+                    "details": actionXrefsData.getDetails()[i],
+                }
+            )
+    return ret
+
+
+@jsonrpc
+def list_dex_strings(filepath):
+    """
+    Retrieve the list of strings defined in the dex constants pools.
+    """
+    if not filepath:
+        raise JSONRPCError(-1, ErrorMessages.MISSING_PARAM)
+
+    apk = getOrLoadApk(filepath)
+    if apk is None:
+        return []
+
+    codeUnit = apk.getDex()
+    if not codeUnit:
+        return []
+
+    strings = codeUnit.getStrings()
+    return [s.getValue() for s in strings]
+
+
+@jsonrpc
+def get_all_classes(filepath):
+    """
+    List all classes in the project (from the Dex unit).
+    """
+    if not filepath:
+        raise JSONRPCError(-1, ErrorMessages.MISSING_PARAM)
+
+    apk = getOrLoadApk(filepath)
+    if apk is None:
+        return []
+
+    codeUnit = apk.getDex()
+    if not codeUnit:
+        return []
+
+    classes = codeUnit.getClasses()
+    return [c.getSignature(True) for c in classes]
+
+
+@jsonrpc
+def get_all_resource_file_names(filepath):
+    """
+    Retrieve all resource files names that exists in application.
+    """
+    if not filepath:
+        raise JSONRPCError(-1, ErrorMessages.MISSING_PARAM)
+
+    apk = getOrLoadApk(filepath)
+    res_unit = apk.getResources()
+    if not res_unit:
+        return []
+
+    all_files = []
+
+    def collect(current, current_path=""):
+        children = current.getChildren()
+        if not children:
+            # If no children, it's likely a file/leaf node
+            all_files.append(current_path)
+            return
+
+        for child in children:
+            name = child.getName()
+            new_path = (current_path + "/" + name) if current_path else name
+            collect(child, new_path)
+
+    collect(res_unit)
+    return all_files
+
+
+@jsonrpc
+def get_apk_resource_by_path(filepath, resource_path):
+    """
+    Retrieve the contents of an APK structured resource file using its fully-qualified name.
+    examples: values-v30/strings.xml, layout/foo.txt
+    """
+    if not filepath or not resource_path:
+        raise JSONRPCError(-1, ErrorMessages.MISSING_PARAM)
+
+    apk = getOrLoadApk(filepath)
+    res_unit = apk.getResources()
+    if not res_unit:
+        raise JSONRPCError(-1, "[Error] Resources unit not found.")
+
+    def find_unit(current, path_parts):
+        if not path_parts:
+            return current
+
+        target = path_parts[0]
+        for child in current.getChildren():
+            if child.getName() == target:
+                return find_unit(child, path_parts[1:])
+        return None
+
+    # Try directly
+    leaf = find_unit(res_unit, resource_path.split("/"))
+
+    # If not found and the first part is identify as under 'res', try prepending 'res'
+    if not leaf and not resource_path.startswith("res/"):
+        leaf = find_unit(res_unit, ["res"] + resource_path.split("/"))
+
+    if not leaf:
+        raise JSONRPCError(-1, ErrorMessages.RESOURCE_NOT_FOUND + " " + resource_path)
+
+    try:
+        formatter = leaf.getFormatter()
+        if not formatter:
+            raise JSONRPCError(-1, "[Error] Resource has no formatter.")
+
+        presentation = formatter.getPresentation(0)
+        if not presentation:
+            raise JSONRPCError(-1, "[Error] Resource has no presentation (0).")
+
+        doc = presentation.getDocument()
+        if not doc:
+            raise JSONRPCError(-1, "[Error] Resource has no document.")
+
+        return TextDocumentUtil.getText(doc)
+    except Exception as e:
+        raise JSONRPCError(-1, "[Error] Failed to read resource content: " + str(e))
+
+
+@jsonrpc
+def add_comment(filepath, address, comment):
+    """
+    Add a comment to function, class, field or any address in a code unit.
+    The address can be a signature (e.g., Lcom/abc/Foo;->bar()V) or a virtual address.
+    """
+    if not filepath or not address or comment is None:
+        raise JSONRPCError(-1, ErrorMessages.MISSING_PARAM)
+
+    apk = getOrLoadApk(filepath)
+    codeUnit = apk.getDex()
+
+    # Try to resolve as a signature first
+    item = None
+    if "->" in address:
+        # Method or Field
+        item = codeUnit.getMethod(address)
+        if not item:
+            item = codeUnit.getField(address)
+    elif address.startswith("L") and address.endswith(";"):
+        # Class
+        item = codeUnit.getClass(address)
+
+    if item:
+        itemId = item.getItemId()
+        print(
+            "[MCP] add_comment: item found, itemId={0}, address={1}".format(
+                itemId, address
+            )
+        )
+
+        # JEB comment workflow:
+        # 1. prepareExecution - fills ActionCommentData with current comment
+        # 2. setNewComment - set the new comment text
+        # 3. executeAction - apply the change
+        data = ActionCommentData()
+        act_ctx = ActionContext(codeUnit, Actions.COMMENT, itemId, address)
+        if codeUnit.prepareExecution(act_ctx, data):
+            data.setNewComment(comment)
+            if codeUnit.executeAction(act_ctx, data):
+                print("[MCP] add_comment: success with itemId + address")
+                return True
+            else:
+                print("[MCP] add_comment: executeAction failed")
+        else:
+            print("[MCP] add_comment: prepareExecution failed, trying address-only")
+            # Fallback: address-only
+            data2 = ActionCommentData()
+            act_ctx2 = ActionContext(codeUnit, Actions.COMMENT, 0, address)
+            if codeUnit.prepareExecution(act_ctx2, data2):
+                data2.setNewComment(comment)
+                if codeUnit.executeAction(act_ctx2, data2):
+                    print("[MCP] add_comment: success with address-only")
+                    return True
+
+        raise JSONRPCError(-1, "[Error] Failed to add comment to item: " + address)
+    else:
+        # Try as a virtual address string
+        try:
+            int(address, 16) if address.lower().startswith("0x") else int(address)
+            data = ActionCommentData()
+            act_ctx = ActionContext(codeUnit, Actions.COMMENT, 0, address)
+            if codeUnit.prepareExecution(act_ctx, data):
+                data.setNewComment(comment)
+                if codeUnit.executeAction(act_ctx, data):
+                    return True
+            raise JSONRPCError(
+                -1, "[Error] Failed to add comment to address: " + address
+            )
+        except ValueError:
+            raise JSONRPCError(
+                -1, "[Error] Could not resolve address or signature: " + address
+            )
+
+
 def raise_class_not_found(class_signature):
     if class_signature.startswith("Ldalvik") or class_signature.startswith("Ljava") or class_signature.startswith("Landroid"):
         raise JSONRPCError(-1, ErrorMessages.CLASS_NOT_FOUND_WITHOUT_CHECK)
@@ -1073,6 +1556,9 @@ class ErrorMessages:
     CLASS_NOT_FOUND_WITHOUT_CHECK = "[Error] Class not found in current apk."
     FIELD_NOT_FOUND = "[Error] Field not found in current apk, use check_java_identifier tool check your input first."
     FIELD_NOT_FOUND_WITHOUT_CHECK = "[Error] Field not found in current apk."
+    RESOURCE_NOT_FOUND = "[Error] Resource not found."
+    ADDRESS_NOT_FOUND = "[Error] Address not found in code unit."
+    VAR_NOT_FOUND = "[Error] Variable not found in pseudo-code."
 
 
 CTX = None

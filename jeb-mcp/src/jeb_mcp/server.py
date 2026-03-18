@@ -25,9 +25,12 @@ def make_jsonrpc_request(method: str, *params):
     jsonrpc_request_id += 1
 
     try:
-        conn.request("POST", "/mcp", json.dumps(request), {
-            "Content-Type": "application/json"
-        })
+        conn.request(
+            "POST",
+            "/mcp",
+            json.dumps(request),
+            {"Content-Type": "application/json"},
+        )
         response = conn.getresponse()
         data = json.loads(response.read().decode())
 
@@ -70,15 +73,20 @@ SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 JEB_PLUGIN_PY = os.path.join(SCRIPT_DIR, "MCP.py")
 GENERATED_PY = os.path.join(SCRIPT_DIR, "server_generated.py")
 
+
 def generate():
-    with open(GENERATED_PY, "r") as f:
+    with open(GENERATED_PY, "r", encoding="utf8") as f:
         code = f.read()
         exec(compile(code, GENERATED_PY, "exec"))
 
+
 generate()
+
+
 def main():
     argparse.ArgumentParser(description="JEB Pro MCP Server")
     mcp.run(transport="stdio")
+
 
 if __name__ == "__main__":
     main()
