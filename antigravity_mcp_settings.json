@@ -1,0 +1,40 @@
+{
+  "mcpServers": {
+    "jeb": {
+      "autoApprove": [
+        "ping",
+        "check_connection",
+        "get_manifest",
+        "get_all_exported_activities",
+        "get_class_decompiled_code",
+        "get_method_decompiled_code",
+        "get_method_overrides",
+        "get_method_callers",
+        "get_superclass",
+        "get_interfaces",
+        "get_class_methods",
+        "get_class_fields",
+        "get_field_callers",
+        "rename_class_name",
+        "rename_method_name",
+        "rename_class_field",
+        "check_java_identifier",
+        "get_apk_resource_by_path",
+        "list_cross_references",
+        "list_dex_strings",
+        "rename_pseudo_code_variables",
+        "get_all_classes",
+        "get_all_resource_file_names",
+        "add_comment"
+      ],
+      "args": [
+        "--directory",
+        "d:/jebmcp/jeb-mcp",
+        "run",
+        "d:/jebmcp/jeb-mcp/src/jeb_mcp/server.py"
+      ],
+      "disabled": false,
+      "command": "uv"
+    }
+  }
+}
