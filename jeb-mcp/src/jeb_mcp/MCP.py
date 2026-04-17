@@ -885,14 +885,13 @@ def rename_code_item(filepath, item_signature, new_name):
     act_ctx = ActionContext(codeUnit, Actions.RENAME, itemId, None)
     if codeUnit.prepareExecution(act_ctx, data):
         data.setNewName(new_name)
+        # Attempt to bypass name checks if it's supported, reducing the likelihood of action failure
+        data.setBypassNameChecks(True)
         if codeUnit.executeAction(act_ctx, data):
             print(u"rename item successfully executed via Action Engine: {0}".format(new_name).encode("utf-8"))
             return True
 
-    # Fallback to direct rename if Action Engine fails
-    print(u"rename item fallback: {0} to {1}".format(item.getName(), new_name).encode("utf-8"))
-    item.setName(new_name)
-    return True
+    raise JSONRPCError(-1, u"[Error] Failed to rename item using Action Engine: " + item_signature)
 
 
 def replace_last_once(s, old, new):
@@ -1063,6 +1062,9 @@ def rename_pseudo_code_variables(
         )
         all_debug.extend(dbg)
         if found:
+            # Force cache reload to prevent returning stale data
+            try: decomp.removeDecompilation(method_sig)
+            except Exception: pass
             return True
 
     # Strategy 3: Search lambda/synthetic methods in the same class
@@ -1096,8 +1098,11 @@ def rename_pseudo_code_variables(
                         found, dbg = _try_rename_in_java_method(
                             decomp, jm, old_var_name, new_var_name
                         )
-                        all_debug.extend(dbg)
                         if found:
+                            try:
+                                decomp.removeDecompilation(m_sig)
+                                decomp.removeDecompilation(method_sig)
+                            except Exception: pass
                             return True
                     except Exception:
                         continue
@@ -1123,6 +1128,10 @@ def rename_pseudo_code_variables(
                         )
                         # We don't append every single inner class dbg failure to avoid huge error msgs
                         if found:
+                            try:
+                                decomp.removeDecompilation(m_sig)
+                                decomp.removeDecompilation(method_sig)
+                            except Exception: pass
                             return True
                     except Exception:
                         continue
@@ -1172,9 +1181,10 @@ def list_cross_references(filepath, address):
 
 
 @jsonrpc
-def list_dex_strings(filepath):
+def list_dex_strings(filepath, pattern=None, limit=1000, offset=0):
     """
     Retrieve the list of strings defined in the dex constants pools.
+    Supports filtering and pagination to prevent memory issues.
     """
     apk = getOrLoadApk(filepath)
     if apk is None:
@@ -1185,13 +1195,32 @@ def list_dex_strings(filepath):
         return []
 
     strings = codeUnit.getStrings()
-    return [s.getValue() for s in strings]
+    results = []
+    
+    count = 0
+    for s in strings:
+        val = s.getValue()
+        if not val:
+            continue
+            
+        if pattern and pattern not in val:
+            continue
+            
+        if count >= offset:
+            results.append(val)
+            
+        count += 1
+        if len(results) >= limit:
+            break
+            
+    return results
 
 
 @jsonrpc
-def get_all_classes(filepath):
+def get_all_classes(filepath, package_prefix=None, limit=1000, offset=0):
     """
     List all classes in the project (from the Dex unit).
+    Supports filtering and pagination to prevent memory issues.
     """
     apk = getOrLoadApk(filepath)
 
@@ -1200,7 +1229,25 @@ def get_all_classes(filepath):
         return []
 
     classes = codeUnit.getClasses()
-    return [c.getSignature(True) for c in classes]
+    results = []
+    
+    count = 0
+    for c in classes:
+        sig = c.getSignature(True)
+        if not sig:
+            continue
+            
+        if package_prefix and package_prefix not in sig:
+            continue
+            
+        if count >= offset:
+            results.append(sig)
+            
+        count += 1
+        if len(results) >= limit:
+            break
+            
+    return results
 
 
 def _extract_text_content(unit):
@@ -1573,15 +1620,41 @@ def _search_in_file_index(index, query, category):
 
                 if query in content:
                     matching_lines = []
-                    lines = content.split("\n")
-                    # 限制结果行数避免前端拥堵
-                    for i, line in enumerate(lines, 1):
-                        current_line = line.strip()
-                        if query in current_line:
-                            matching_lines.append(u"L{0}: {1}".format(i, current_line))
-                            if len(matching_lines) > 50:  # 每个文件最多匹配 50 行
-                                matching_lines.append("... (too many matches)")
-                                break
+                    
+                    # Use iterative find() instead of split("\n") to save memory
+                    start = 0
+                    line_num = 1
+                    while True:
+                        idx = content.find(query, start)
+                        if idx == -1:
+                            break
+                            
+                        # Find line boundaries
+                        line_start = content.rfind("\n", start, idx)
+                        line_start = start if line_start == -1 else line_start + 1
+                        
+                        # If start > 0 and line_start == start, maybe the preceding char wasn't checked
+                        # Properly find previous \n looking backwards from idx
+                        real_line_start = content.rfind("\n", 0, idx)
+                        real_line_start = 0 if real_line_start == -1 else real_line_start + 1
+                        
+                        line_end = content.find("\n", idx)
+                        if line_end == -1:
+                            line_end = len(content)
+                            
+                        # Update line number count
+                        line_num += content.count("\n", start, idx)
+                        
+                        current_line = content[real_line_start:line_end].strip()
+                        matching_lines.append(u"L{0}: {1}".format(line_num, current_line))
+                        
+                        if len(matching_lines) > 50:
+                            matching_lines.append("... (too many matches)")
+                            break
+                            
+                        # Skip to the next line
+                        start = line_end + 1
+                        line_num += 1
                     if matching_lines:
                         results.append(
                             {

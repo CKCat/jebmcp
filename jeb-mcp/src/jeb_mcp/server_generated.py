@@ -4,7 +4,7 @@ from typing import Annotated, TypeVar
 
 T = TypeVar("T")
 
-
+# fmt: off
 
 @mcp.tool()
 def get_manifest(
@@ -43,6 +43,7 @@ def get_decompiled_code(
     """
     Get the decompiled Java code (pseudo-code) of the given class or method.
     If providing a class signature, the entire class is decompiled.
+    TIP: To decompile a method, use get_class_members or check_java_identifier first to ensure the exact signature is correct.
     """
     return make_jsonrpc_request("get_decompiled_code", filepath, item_signature)
 
@@ -138,10 +139,11 @@ def check_java_identifier(
 def list_cross_references(
     filepath: Annotated[str, "The absolute filesystem path to the APK file. If the APK is already open in JEB, you can pass an empty string \"\"."],
     address: Annotated[
-        str, "The address or signature (Lcom/abc/Foo;->bar()V) to query XREFs for."
+        str, "The method/field signature (Lcom/abc/Foo;->bar()V) or code address to query XREFs for."
     ],
 ) -> list[dict]:
-    """Retrieve callers (XREFs) of the item at the provided address or signature."""
+    """Retrieve callers (XREFs) of the item. Note: Does not support direct string pool IDs; 
+    to find string usage, use search_in_project with search_type='string' first."""
     return make_jsonrpc_request("list_cross_references", filepath, address)
 
 
@@ -172,17 +174,23 @@ def rename_pseudo_code_variables(
 @mcp.tool()
 def list_dex_strings(
     filepath: Annotated[str, "The absolute filesystem path to the APK file. If the APK is already open in JEB, you can pass an empty string \"\"."],
+    pattern: Annotated[str, "Optional string pattern to filter results."] = None,
+    limit: Annotated[int, "Maximum number of strings to return."] = 1000,
+    offset: Annotated[int, "Offset to start returning strings from (for pagination)."] = 0,
 ) -> list[str]:
-    """Retrieve all strings from the DEX constant pools. Useful for searching hardcoded keys or URLs."""
-    return make_jsonrpc_request("list_dex_strings", filepath)
+    """Retrieve strings from the DEX constant pools. Useful for searching hardcoded keys or URLs. Supports pagination and filtering."""
+    return make_jsonrpc_request("list_dex_strings", filepath, pattern, limit, offset)
 
 
 @mcp.tool()
 def get_all_classes(
     filepath: Annotated[str, "The absolute filesystem path to the APK file. If the APK is already open in JEB, you can pass an empty string \"\"."],
+    package_prefix: Annotated[str, "Optional package prefix to filter classes."] = None,
+    limit: Annotated[int, "Maximum number of classes to return."] = 1000,
+    offset: Annotated[int, "Offset to start returning classes from (for pagination)."] = 0,
 ) -> list[str]:
-    """List all class signatures in the APK (from the main DEX unit)."""
-    return make_jsonrpc_request("get_all_classes", filepath)
+    """List class signatures in the APK (from the main DEX unit). Supports filtering by package prefix and pagination."""
+    return make_jsonrpc_request("get_all_classes", filepath, package_prefix, limit, offset)
 
 
 @mcp.tool()
@@ -214,7 +222,7 @@ def get_apk_file_content(
 def add_comment(
     filepath: Annotated[str, "The absolute filesystem path to the APK file. If the APK is already open in JEB, you can pass an empty string \"\"."],
     address: Annotated[
-        str, "The address or signature where the comment should be added."
+        str, "The address or signature (e.g., 'Lcom/abc/Foo;->bar()V') where the comment should be added."
     ],
     comment: Annotated[str, "The comment text to add."],
 ):
@@ -234,6 +242,7 @@ def search_in_project(
     """
     Search for strings or identifiers (classes/methods) in the project.
     Useful for finding hardcoded domains, secrets, or specific obfuscated names.
+    Primary tool for initial asset discovery, sensitive string hunting, and cross-referencing hardcoded constants.
     search_type can be 'string' (default), 'identifier', 'resource', 'asset', or 'native'.
     - 'string': search DEX string pool for matching values.
     - 'identifier': search class/method signatures.
