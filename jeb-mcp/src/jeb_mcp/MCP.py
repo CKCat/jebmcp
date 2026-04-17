@@ -24,6 +24,7 @@ from com.pnfsoftware.jeb.core.actions import (
     ActionContext,
     ActionCommentData,
     ActionOverridesData,
+    ActionRenameData,
     Actions,
     ActionXrefsData,
 )
@@ -665,16 +666,18 @@ def get_smali_code(filepath, item_signature):
     if item_type == "method":
         instructions = item.getInstructions()
         lines = []
-        for instruction in instructions:
-            lines.append(instruction.format(None))
+        if instructions:
+            for instruction in instructions:
+                lines.append(instruction.format(None))
         return "\n".join(lines)
     elif item_type == "class":
         lines = []
         for method in item.getMethods():
             lines.append("method: " + method.getSignature(True))
             instructions = method.getInstructions()
-            for instruction in instructions:
-                lines.append(instruction.format(None))
+            if instructions:
+                for instruction in instructions:
+                    lines.append(instruction.format(None))
             lines.append("")
         return "\n".join(lines)
 
@@ -875,7 +878,19 @@ def rename_code_item(filepath, item_signature, new_name):
         print(u"Item not found: {0}".format(item_signature).encode("utf-8"))
         raise JSONRPCError(-1, u"[Error] Item not found: " + item_signature)
 
-    print(u"rename item: {0} to {1}".format(item.getName(), new_name).encode("utf-8"))
+    itemId = item.getItemId()
+    print(u"[MCP] rename_code_item: item found, itemId={0}, type={1}".format(itemId, item_type))
+
+    data = ActionRenameData()
+    act_ctx = ActionContext(codeUnit, Actions.RENAME, itemId, None)
+    if codeUnit.prepareExecution(act_ctx, data):
+        data.setNewName(new_name)
+        if codeUnit.executeAction(act_ctx, data):
+            print(u"rename item successfully executed via Action Engine: {0}".format(new_name).encode("utf-8"))
+            return True
+
+    # Fallback to direct rename if Action Engine fails
+    print(u"rename item fallback: {0} to {1}".format(item.getName(), new_name).encode("utf-8"))
     item.setName(new_name)
     return True
 
@@ -1020,8 +1035,8 @@ def rename_pseudo_code_variables(
     apk = getOrLoadApk(filepath)
 
     codeUnit = apk.getDex()
-    method = codeUnit.getMethod(method_signature)
-    if not method:
+    method, item_type = find_item_by_signature(codeUnit, method_signature)
+    if not method or item_type != "method":
         raise_method_not_found(method_signature)
 
     decomp = DecompilerHelper.getDecompiler(codeUnit)
@@ -1161,8 +1176,6 @@ def list_dex_strings(filepath):
     """
     Retrieve the list of strings defined in the dex constants pools.
     """
-    pass
-
     apk = getOrLoadApk(filepath)
     if apk is None:
         return []
@@ -1180,8 +1193,6 @@ def get_all_classes(filepath):
     """
     List all classes in the project (from the Dex unit).
     """
-    pass
-
     apk = getOrLoadApk(filepath)
 
     codeUnit = apk.getDex()
@@ -1412,7 +1423,7 @@ def add_comment(filepath, address, comment):
     lookup_address = address
     offset_str = ""
     if "->" in address and "+" in address:
-        parts = address.split("+")
+        parts = address.rsplit("+", 1)
         lookup_address = parts[0]
         offset_str = parts[1]
 
