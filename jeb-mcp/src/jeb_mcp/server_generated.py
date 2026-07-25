@@ -238,6 +238,7 @@ def search_in_project(
     filepath: Annotated[str, "The absolute filesystem path to the APK file. If the APK is already open in JEB, you can pass an empty string \"\"."],
     query: Annotated[str, "The search term or regular expression."],
     search_type: Annotated[str, "Type of search: 'string' or 'identifier'."] = "string",
+    limit: Annotated[int, "Maximum number of results to return to prevent memory or payload overload."] = 1000,
 ) -> list[dict]:
     """
     Search for strings or identifiers (classes/methods) in the project.
@@ -249,7 +250,7 @@ def search_in_project(
     - 'resource': search resource file paths and text content (xml, json, etc).
     - 'asset': search asset file paths and text content.
     """
-    return make_jsonrpc_request("search_in_project", filepath, query, search_type)
+    return make_jsonrpc_request("search_in_project", filepath, query, search_type, limit)
 
 
 @mcp.tool()
@@ -270,11 +271,12 @@ def perform_security_scan(
 def export_all_resources(
     filepath: Annotated[str, "The absolute filesystem path to the APK file. If the APK is already open in JEB, you can pass an empty string \"\"."],
     output_dir: Annotated[
-        str, "The absolute path to the local directory where resources will be saved."
-    ],
+        str, "The absolute path to the local directory where resources will be saved. Defaults to a '_dump' directory next to the APK if empty."
+    ] = "",
 ) -> dict:
     """
     Export all accessible resources and assets to a local directory structure.
     Enables deep analysis with external grep or auditing tools.
     """
     return make_jsonrpc_request("export_all_resources", filepath, output_dir)
+
